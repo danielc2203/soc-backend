@@ -228,6 +228,26 @@ def run_tool_scan(request: ScanRequest, db: Session = Depends(get_db)):
 # ==========================================
 # 4. DASHBOARD VISUAL (Frontend)
 # ==========================================
+@app.get("/api/history")
+def get_scan_history(db: Session = Depends(get_db)):
+    """Extrae todo el historial de escaneos de la Base de Datos"""
+    scans = db.query(Scan).order_by(Scan.executed_at.desc()).all()
+    history = []
+    for scan in scans:
+        history.append({
+            "id": scan.id,
+            "date": scan.executed_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "target": scan.target.identity if scan.target else "Desconocido",
+            "tool": scan.tool.name if scan.tool else "Desconocida",
+            "status": scan.status,
+            "raw_output": scan.raw_output,
+            "ai_analysis": scan.ai_analysis
+        })
+    return {"status": "success", "data": history}
+@app.get("/dashboard", response_class=HTMLResponse)
+# ==========================================
+# 4. DASHBOARD VISUAL (Frontend)
+# ==========================================
 @app.get("/dashboard", response_class=HTMLResponse)
 def serve_dashboard():
     html_content = """
@@ -244,6 +264,13 @@ def serve_dashboard():
                 theme: { extend: { colors: { gray: { 900: '#111827', 800: '#1f2937' }, green: { 400: '#4ade80' } } } }
             }
         </script>
+        <style>
+            /* Custom scrollbar para los reportes largos */
+            ::-webkit-scrollbar { width: 8px; height: 8px; }
+            ::-webkit-scrollbar-track { background: #1f2937; }
+            ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+            ::-webkit-scrollbar-thumb:hover { background: #6b7280; }
+        </style>
     </head>
     <body class="bg-gray-900 text-white font-sans antialiased p-6">
         
@@ -259,50 +286,127 @@ def serve_dashboard():
             }
         </script>
 
-        <div class="max-w-6xl mx-auto">
-            <header class="flex justify-between items-center mb-10 border-b border-gray-700 pb-4">
-                <h1 class="text-3xl font-bold text-green-400">🛡️ TECCO SOC <span class="text-gray-400 text-lg font-normal">v1.0</span></h1>
-                <div class="text-sm text-gray-400">Operaciones Tácticas e IA</div>
+        <div class="max-w-7xl mx-auto">
+            <header class="flex justify-between items-center mb-6 border-b border-gray-700 pb-4">
+                <h1 class="text-3xl font-bold text-green-400">🛡️ TECCO SOC <span class="text-gray-400 text-lg font-normal">v2.0</span></h1>
+                <div class="text-sm text-gray-400">Centro de Mando Avanzado</div>
             </header>
 
-            <div class="bg-gray-800 p-6 rounded-lg shadow-lg mb-8 border border-gray-700">
-                <h2 class="text-xl font-semibold mb-4">Añadir nueva herramienta desde GitHub</h2>
-                <div class="flex gap-4">
-                    <input type="text" id="repoUrl" placeholder="https://github.com/usuario/repo" class="w-full bg-gray-900 border border-gray-600 rounded px-4 py-2 text-white focus:outline-none focus:border-green-400">
-                    <button onclick="addTool()" id="addBtn" class="bg-green-600 hover:bg-green-500 text-white font-bold py-2 px-6 rounded transition flex-shrink-0">
-                        Analizar con IA
-                    </button>
-                </div>
-                <p id="statusMsg" class="mt-3 text-sm text-gray-400 hidden"></p>
+            <!-- SISTEMA DE PESTAÑAS -->
+            <div class="flex space-x-6 mb-8 border-b border-gray-800">
+                <button id="tabBtn-arsenal" onclick="switchTab('arsenal')" class="pb-3 text-green-400 border-b-2 border-green-400 font-semibold transition-colors">🚀 Arsenal Táctico</button>
+                <button id="tabBtn-history" onclick="switchTab('history')" class="pb-3 text-gray-500 hover:text-gray-300 border-b-2 border-transparent font-semibold transition-colors">🗄️ Historial de Operaciones</button>
             </div>
 
-            <h2 class="text-2xl font-semibold mb-6">Arsenal Disponible</h2>
-            <div id="toolsGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
+            <!-- VISTA 1: ARSENAL (Lo que ya tenías) -->
+            <div id="view-arsenal" class="block">
+                <div class="bg-gray-800 p-6 rounded-lg shadow-lg mb-8 border border-gray-700">
+                    <h2 class="text-xl font-semibold mb-4">Añadir nueva herramienta desde GitHub</h2>
+                    <div class="flex gap-4">
+                        <input type="text" id="repoUrl" placeholder="https://github.com/usuario/repo" class="w-full bg-gray-900 border border-gray-600 rounded px-4 py-2 text-white focus:outline-none focus:border-green-400">
+                        <button onclick="addTool()" id="addBtn" class="bg-green-600 hover:bg-green-500 text-white font-bold py-2 px-6 rounded transition flex-shrink-0">
+                            Analizar con IA
+                        </button>
+                    </div>
+                    <p id="statusMsg" class="mt-3 text-sm text-gray-400 hidden"></p>
+                </div>
+
+                <h2 class="text-2xl font-semibold mb-6">Arsenal Disponible</h2>
+                <div id="toolsGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
+            </div>
+
+            <!-- VISTA 2: HISTORIAL Y REPORTES -->
+            <div id="view-history" class="hidden">
+                <div class="bg-gray-800 rounded-lg shadow-lg border border-gray-700 overflow-hidden">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="bg-gray-900 border-b border-gray-700 text-gray-400 text-sm">
+                                <th class="p-4 font-semibold">Fecha y Hora</th>
+                                <th class="p-4 font-semibold">Objetivo</th>
+                                <th class="p-4 font-semibold">Herramienta</th>
+                                <th class="p-4 font-semibold">Estado</th>
+                                <th class="p-4 font-semibold text-right">Acción</th>
+                            </tr>
+                        </thead>
+                        <tbody id="historyTableBody" class="text-sm divide-y divide-gray-700/50">
+                            <!-- JS inyectará el historial aquí -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
         </div>
 
-        <!-- Modal de Ejecución -->
+        <!-- MODAL 1: LANZAR ATAQUE -->
         <div id="scanModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15, 23, 42, 0.85); z-index:1000; justify-content:center; align-items:center; backdrop-filter: blur(4px);">
             <div style="background:#1e293b; padding:25px; border-radius:12px; width:90%; max-width:550px; color:white; border: 1px solid #334155; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);">
                 <h3 id="modalTitle" style="margin-top:0; color:#e2e8f0; font-size: 1.5rem;">Lanzar Ataque</h3>
-                <p style="color:#94a3b8; font-size: 0.9rem;">Ingrese el objetivo a evaluar (URL o IP):</p>
+                <p style="color:#94a3b8; font-size: 0.9rem; margin-bottom:15px;">Ingrese el objetivo a evaluar (URL o IP):</p>
                 <input type="text" id="targetInput" placeholder="Ej: tecco.com.co" style="width:100%; padding:12px; margin-bottom:20px; border-radius:6px; border:1px solid #475569; background:#0f172a; color:#f8fafc; font-size:1rem; outline:none;">
                 
                 <div id="loadingIndicator" style="display:none; color:#10b981; margin-bottom:20px; text-align:center;">
                     <p style="animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;">⚙️ Desplegando contenedor y analizando con IA...<br><span style="font-size:0.8rem; color:#64748b;">Esto puede tomar hasta 3 minutos.</span></p>
                 </div>
-
                 <div id="resultArea" style="display:none; margin-bottom:20px; padding:15px; border-radius:8px; background:#0f172a; border: 1px solid #334155; max-height: 400px; overflow-y: auto;"></div>
 
                 <div style="display:flex; justify-content:flex-end; gap:12px;">
-                    <button onclick="closeModal()" style="padding:10px 18px; background:#475569; color:white; border:none; border-radius:6px; cursor:pointer; font-weight:500; transition: background 0.3s;">Cancelar</button>
-                    <button id="runBtn" onclick="ejecutarEscaneo()" style="padding:10px 18px; background:#ef4444; color:white; border:none; border-radius:6px; cursor:pointer; font-weight:bold; box-shadow: 0 4px 6px -1px rgba(239, 68, 68, 0.3); transition: background 0.3s;">🚀 Ejecutar</button>
+                    <button onclick="closeModal('scanModal')" style="padding:10px 18px; background:#475569; color:white; border:none; border-radius:6px; cursor:pointer;">Cancelar</button>
+                    <button id="runBtn" onclick="ejecutarEscaneo()" style="padding:10px 18px; background:#ef4444; color:white; border:none; border-radius:6px; font-weight:bold;">🚀 Ejecutar</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- MODAL 2: VER REPORTE DE INTELIGENCIA -->
+        <div id="reportModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0, 0, 0, 0.9); z-index:2000; justify-content:center; align-items:center; backdrop-filter: blur(8px);">
+            <div style="background:#111827; border-radius:12px; width:95%; max-width:800px; max-height:90vh; display:flex; flex-direction:column; border: 1px solid #374151; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 1);">
+                
+                <!-- Encabezado del Modal -->
+                <div class="p-6 border-b border-gray-800 flex justify-between items-start">
+                    <div>
+                        <h3 class="text-2xl font-bold text-white mb-1" id="rep-title">📄 Informe Detallado de Inteligencia</h3>
+                        <p class="text-gray-400 text-sm" id="rep-subtitle">Objetivo: -- | Herramienta: -- | Fecha: --</p>
+                    </div>
+                    <span id="rep-badge" class="px-3 py-1 rounded-full text-sm font-bold border">Estado</span>
+                </div>
+
+                <!-- Cuerpo Scrollable -->
+                <div class="p-6 overflow-y-auto flex-grow bg-gray-900">
+                    <h4 class="text-lg font-semibold text-blue-400 mb-3 border-b border-gray-800 pb-2">🧠 Análisis Ejecutivo (Qwen IA)</h4>
+                    <div id="rep-ai" class="text-gray-300 text-sm leading-relaxed mb-8 whitespace-pre-wrap">Cargando análisis...</div>
+
+                    <h4 class="text-lg font-semibold text-gray-400 mb-3 border-b border-gray-800 pb-2">💻 Telemetría Cruda (Consola)</h4>
+                    <pre id="rep-raw" class="bg-black text-green-500 p-4 rounded-lg text-xs overflow-x-auto border border-gray-800 font-mono">Cargando consola...</pre>
+                </div>
+
+                <!-- Pie del Modal -->
+                <div class="p-4 border-t border-gray-800 flex justify-end bg-gray-900 rounded-b-12px">
+                    <button onclick="closeModal('reportModal')" class="bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 px-6 rounded transition">Cerrar Informe</button>
                 </div>
             </div>
         </div>
 
         <script>
             let currentToolId = null;
+            let historyDataRaw = []; // Guardamos los datos puros para el modal
 
+            // --- NAVEGACIÓN POR PESTAÑAS ---
+            function switchTab(tabName) {
+                // Ocultar todo
+                document.getElementById('view-arsenal').classList.add('hidden');
+                document.getElementById('view-history').classList.add('hidden');
+                
+                // Resetear botones
+                document.getElementById('tabBtn-arsenal').className = "pb-3 text-gray-500 hover:text-gray-300 border-b-2 border-transparent font-semibold transition-colors";
+                document.getElementById('tabBtn-history').className = "pb-3 text-gray-500 hover:text-gray-300 border-b-2 border-transparent font-semibold transition-colors";
+
+                // Activar pestaña seleccionada
+                document.getElementById(`view-${tabName}`).classList.remove('hidden');
+                document.getElementById(`tabBtn-${tabName}`).className = "pb-3 text-green-400 border-b-2 border-green-400 font-semibold transition-colors";
+
+                if (tabName === 'history') loadHistory();
+            }
+
+            // --- FUNCIONES DEL ARSENAL ---
             async function loadTools() {
                 try {
                     const response = await fetch('/api/tools');
@@ -311,7 +415,7 @@ def serve_dashboard():
                     grid.innerHTML = '';
 
                     result.data.forEach(tool => {
-                        const card = `
+                        grid.innerHTML += `
                             <div class="bg-gray-800 border border-gray-700 rounded-lg p-5 hover:border-green-400 transition flex flex-col h-full">
                                 <div class="flex justify-between items-start mb-3">
                                     <h3 class="text-lg font-bold text-white">${tool.name}</h3>
@@ -320,61 +424,89 @@ def serve_dashboard():
                                 <p class="text-gray-400 text-sm mb-4 flex-grow">${tool.description}</p>
                                 <div class="text-xs text-gray-500 mt-auto">
                                     <p>⚙️ Script: <span class="text-gray-300">${tool.main_script}</span></p>
-                                    <a href="${tool.repo_url}" target="_blank" class="text-blue-400 hover:underline mt-2 inline-block">Ver en GitHub ↗</a>
                                 </div>
                                 <div class="mt-5 pt-4 border-t border-gray-700">
-                                    <button onclick="openModal(${tool.id}, '${tool.name}')" class="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-2 px-4 rounded transition-colors shadow-lg shadow-red-500/30">
+                                    <button onclick="openAttackModal(${tool.id}, '${tool.name}')" class="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-2 px-4 rounded transition shadow-lg shadow-red-500/30">
                                         🎯 Lanzar contra objetivo
                                     </button>
                                 </div>
                             </div>
                         `;
-                        grid.innerHTML += card;
                     });
-                } catch (error) {
-                    console.error("Error cargando herramientas:", error);
-                }
+                } catch (e) { console.error("Error cargando herramientas:", e); }
             }
 
             async function addTool() {
+                /* ... (Mismo código de addTool de antes) ... */
                 const urlInput = document.getElementById('repoUrl');
                 const btn = document.getElementById('addBtn');
                 const msg = document.getElementById('statusMsg');
-                
                 if (!urlInput.value) return;
 
-                btn.disabled = true;
-                btn.innerHTML = 'Procesando con IA... ⏳';
+                btn.disabled = true; btn.innerHTML = 'Procesando... ⏳';
                 msg.classList.remove('hidden', 'text-red-400', 'text-green-400');
-                msg.classList.add('text-gray-400');
-                msg.innerText = 'Descargando repositorio y analizando...';
+                msg.classList.add('text-gray-400'); msg.innerText = 'Analizando...';
 
                 try {
                     const res = await fetch('/api/tools/add', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ repo_url: urlInput.value })
                     });
                     const data = await res.json();
-
                     if (res.ok) {
                         msg.classList.replace('text-gray-400', 'text-green-400');
-                        msg.innerText = '¡Herramienta añadida con éxito!';
-                        urlInput.value = '';
-                        loadTools();
-                    } else {
-                        throw new Error(data.detail || "Error desconocido");
-                    }
-                } catch (error) {
+                        msg.innerText = '¡Añadida con éxito!';
+                        urlInput.value = ''; loadTools();
+                    } else throw new Error(data.detail);
+                } catch (err) {
                     msg.classList.replace('text-gray-400', 'text-red-400');
-                    msg.innerText = '❌ Error: ' + error.message;
+                    msg.innerText = '❌ Error: ' + err.message;
                 } finally {
-                    btn.disabled = false;
-                    btn.innerHTML = 'Analizar con IA';
+                    btn.disabled = false; btn.innerHTML = 'Analizar con IA';
                 }
             }
 
-            function openModal(toolId, toolName) {
+            // --- FUNCIONES DEL HISTORIAL ---
+            async function loadHistory() {
+                try {
+                    const tbody = document.getElementById('historyTableBody');
+                    tbody.innerHTML = '<tr><td colspan="5" class="p-4 text-center text-gray-500">Cargando base de datos táctica...</td></tr>';
+                    
+                    const response = await fetch('/api/history');
+                    const result = await response.json();
+                    historyDataRaw = result.data; // Guardamos globalmente
+                    tbody.innerHTML = '';
+
+                    if(historyDataRaw.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="5" class="p-4 text-center text-gray-500">No hay operaciones registradas.</td></tr>';
+                        return;
+                    }
+
+                    historyDataRaw.forEach((scan, index) => {
+                        // Determinar color de la etiqueta
+                        let badgeHtml = `<span class="bg-green-900/50 text-green-400 px-2 py-1 rounded text-xs border border-green-800">✅ Seguro</span>`;
+                        if (scan.status === "Crítico") badgeHtml = `<span class="bg-red-900/50 text-red-400 px-2 py-1 rounded text-xs border border-red-800">🚨 Crítico</span>`;
+                        if (scan.status === "Advertencia") badgeHtml = `<span class="bg-yellow-900/50 text-yellow-400 px-2 py-1 rounded text-xs border border-yellow-800">⚠️ Advertencia</span>`;
+
+                        tbody.innerHTML += `
+                            <tr class="hover:bg-gray-800/50 transition">
+                                <td class="p-4 text-gray-400 font-mono">${scan.date}</td>
+                                <td class="p-4 font-semibold text-blue-300">${scan.target}</td>
+                                <td class="p-4">${scan.tool}</td>
+                                <td class="p-4">${badgeHtml}</td>
+                                <td class="p-4 text-right">
+                                    <button onclick="openReportModal(${index})" class="text-xs bg-gray-700 hover:bg-gray-600 text-white py-1 px-3 rounded border border-gray-600 transition">
+                                        Ver Informe
+                                    </button>
+                                </td>
+                            </tr>
+                        `;
+                    });
+                } catch (e) { console.error("Error cargando historial:", e); }
+            }
+
+            // --- CONTROL DE MODALES ---
+            function openAttackModal(toolId, toolName) {
                 currentToolId = toolId;
                 document.getElementById('modalTitle').innerText = 'Operación: ' + toolName;
                 document.getElementById('targetInput').value = '';
@@ -384,88 +516,66 @@ def serve_dashboard():
                 document.getElementById('scanModal').style.display = 'flex';
             }
 
-            function closeModal() {
-                document.getElementById('scanModal').style.display = 'none';
+            function openReportModal(index) {
+                const scan = historyDataRaw[index];
+                
+                // Llenar datos de la cabecera
+                document.getElementById('rep-subtitle').innerText = `Objetivo: ${scan.target} | Herramienta: ${scan.tool} | Fecha: ${scan.date}`;
+                
+                // Colorear Etiqueta
+                const badge = document.getElementById('rep-badge');
+                if (scan.status === "Crítico") { badge.className = "px-3 py-1 rounded-full text-sm font-bold border bg-red-900/30 text-red-400 border-red-800"; badge.innerText = "🚨 Crítico"; }
+                else if (scan.status === "Advertencia") { badge.className = "px-3 py-1 rounded-full text-sm font-bold border bg-yellow-900/30 text-yellow-400 border-yellow-800"; badge.innerText = "⚠️ Advertencia"; }
+                else { badge.className = "px-3 py-1 rounded-full text-sm font-bold border bg-green-900/30 text-green-400 border-green-800"; badge.innerText = "✅ Seguro"; }
+
+                // Llenar contenido
+                document.getElementById('rep-ai').innerHTML = scan.ai_analysis.replace(/\\n/g, '<br>'); // Formatear saltos de línea
+                document.getElementById('rep-raw').innerText = scan.raw_output;
+
+                document.getElementById('reportModal').style.display = 'flex';
             }
 
+            function closeModal(modalId) {
+                document.getElementById(modalId).style.display = 'none';
+            }
+
+            // --- EJECUCIÓN (Llamada al Backend) ---
             async function ejecutarEscaneo() {
+                /* ... (Mismo código de ejecutarEscaneo de antes, solo que al final llamamos a loadHistory) ... */
                 const target = document.getElementById('targetInput').value.trim();
-                if (!target) {
-                    alert("⚠️ Por favor, ingresa un objetivo válido.");
-                    return;
-                }
+                if (!target) { alert("⚠️ Ingresa un objetivo válido."); return; }
 
                 document.getElementById('runBtn').style.display = 'none';
                 document.getElementById('loadingIndicator').style.display = 'block';
                 document.getElementById('resultArea').style.display = 'none';
 
                 try {
-                    // Como el frontend y el backend están en el mismo servidor, podemos usar rutas relativas (/api/scans/run)
                     const response = await fetch('/api/scans/run', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ tool_id: currentToolId, target: target })
                     });
-
                     const data = await response.json();
-
+                    
                     if (response.ok) {
-                        mostrarResultado(data.data);
-                    } else {
-                        mostrarError(data.detail || "Error desconocido en el servidor");
-                    }
+                        // Ocultar carga y mostrar en el modal (Opcional, ahora todo queda en el historial)
+                        document.getElementById('loadingIndicator').style.display = 'none';
+                        closeModal('scanModal'); 
+                        
+                        // Si estábamos en la pestaña historial, la recargamos. Si no, cambiamos a ella.
+                        switchTab('history');
+                        
+                        // Abrimos directamente el último reporte generado (que será el índice 0)
+                        setTimeout(() => { openReportModal(0); }, 500); 
+
+                    } else throw new Error(data.detail);
                 } catch (error) {
-                    mostrarError("La operación falló o excedió el tiempo límite (Timeout). Detalles: " + error.message);
+                    document.getElementById('loadingIndicator').style.display = 'none';
+                    document.getElementById('runBtn').style.display = 'block';
+                    alert("Falla Crítica: " + error.message);
                 }
             }
 
-            function mostrarResultado(data) {
-                document.getElementById('loadingIndicator').style.display = 'none';
-                const resultArea = document.getElementById('resultArea');
-                resultArea.style.display = 'block';
-                
-                let colorCode = "#10b981"; 
-                let icon = "✅";
-                
-                if (data.severity === "Crítico") {
-                    colorCode = "#ef4444"; 
-                    icon = "🚨";
-                } else if (data.severity === "Advertencia") {
-                    colorCode = "#f59e0b"; 
-                    icon = "⚠️";
-                }
-
-                resultArea.innerHTML = `
-                    <h4 style="color:${colorCode}; margin-top:0; font-size:1.2rem; border-bottom:1px solid #334155; padding-bottom:8px;">
-                        ${icon} Criticidad: ${data.severity}
-                    </h4>
-                    <p style="color:#e2e8f0; font-size:0.95rem; line-height:1.5; margin-top: 10px;">
-                        <strong style="color:#38bdf8;">Reporte IA (Qwen):</strong><br>
-                        ${data.analysis.replace(/\\n/g, '<br>')}
-                    </p>
-                    <details style="margin-top:15px; border-top:1px solid #334155; padding-top:10px;">
-                        <summary style="cursor:pointer; color:#94a3b8; font-size:0.85rem; user-select:none;">
-                            [+] Ver salida en crudo
-                        </summary>
-                        <pre style="background:#000; color:#00ff00; padding:12px; border-radius:6px; overflow-x:auto; font-size:0.75rem; margin-top:10px; border:1px solid #1f2937;">${data.raw}</pre>
-                    </details>
-                `;
-            }
-
-            function mostrarError(mensaje) {
-                document.getElementById('loadingIndicator').style.display = 'none';
-                document.getElementById('runBtn').style.display = 'block';
-                
-                const resultArea = document.getElementById('resultArea');
-                resultArea.style.display = 'block';
-                resultArea.innerHTML = `
-                    <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid #ef4444; padding: 12px; border-radius: 6px;">
-                        <p style="color:#ef4444; margin:0; font-weight:500;">❌ Falla Crítica</p>
-                        <p style="color:#f8fafc; margin:5px 0 0 0; font-size:0.85rem;">${mensaje}</p>
-                    </div>
-                `;
-            }
-
+            // Inicializar página
             loadTools();
         </script>
     </body>
