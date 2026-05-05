@@ -229,6 +229,13 @@ def serve_dashboard():
                                     <p>⚙️ Script: <span class="text-gray-300">${tool.main_script}</span></p>
                                     <a href="${tool.repo_url}" target="_blank" class="text-blue-400 hover:underline mt-2 inline-block">Ver en GitHub ↗</a>
                                 </div>
+                                <!-- Ejemplo dentro de tu tarjeta de cPanelSniper -->
+                                <div class="card-footer">
+                                    <!-- Asumiendo que el ID en la base de datos de cPanelSniper es 1 -->
+                                    <button onclick="openModal(1, 'cPanelSniper')" style="margin-top:15px; padding:8px 15px; background:#3b82f6; color:white; border:none; border-radius:6px; cursor:pointer; font-weight: 500;">
+                                        🎯 Lanzar contra objetivo
+                                    </button>
+                                </div>
                             </div>
                         `;
                         grid.innerHTML += card;
