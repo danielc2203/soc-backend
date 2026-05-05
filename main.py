@@ -280,6 +280,32 @@ def serve_dashboard():
             // Cargar datos al iniciar
             loadTools();
         </script>
+        <!-- Modal de Ejecución (Oculto por defecto) -->
+<div id="scanModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15, 23, 42, 0.85); z-index:1000; justify-content:center; align-items:center; backdrop-filter: blur(4px);">
+    <div style="background:#1e293b; padding:25px; border-radius:12px; width:90%; max-width:550px; color:white; border: 1px solid #334155; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);">
+        
+        <h3 id="modalTitle" style="margin-top:0; color:#e2e8f0; font-size: 1.5rem;">Lanzar Ataque</h3>
+        <p style="color:#94a3b8; font-size: 0.9rem;">Ingrese el objetivo a evaluar (URL o IP):</p>
+        
+        <input type="text" id="targetInput" placeholder="Ej: tecco.com.co" style="width:100%; padding:12px; margin-bottom:20px; border-radius:6px; border:1px solid #475569; background:#0f172a; color:#f8fafc; font-size:1rem; outline:none;">
+        
+        <!-- Indicador de Carga -->
+        <div id="loadingIndicator" style="display:none; color:#10b981; margin-bottom:20px; text-align:center;">
+            <p style="animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;">⚙️ Desplegando contenedor y analizando con IA...<br><span style="font-size:0.8rem; color:#64748b;">Esto puede tomar hasta 3 minutos.</span></p>
+        </div>
+
+        <!-- Área de Resultados (donde Qwen escupirá el reporte) -->
+        <div id="resultArea" style="display:none; margin-bottom:20px; padding:15px; border-radius:8px; background:#0f172a; border: 1px solid #334155; max-height: 400px; overflow-y: auto;">
+            <!-- El JS inyectará el contenido aquí -->
+        </div>
+
+        <!-- Botones de Acción -->
+        <div style="display:flex; justify-content:flex-end; gap:12px;">
+            <button onclick="closeModal()" style="padding:10px 18px; background:#475569; color:white; border:none; border-radius:6px; cursor:pointer; font-weight:500; transition: background 0.3s;">Cancelar</button>
+            <button id="runBtn" onclick="ejecutarEscaneo()" style="padding:10px 18px; background:#ef4444; color:white; border:none; border-radius:6px; cursor:pointer; font-weight:bold; box-shadow: 0 4px 6px -1px rgba(239, 68, 68, 0.3); transition: background 0.3s;">🚀 Ejecutar Herramienta</button>
+        </div>
+    </div>
+</div>
     </body>
     </html>
     """
