@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from models import Base, Tool
+from fastapi.responses import HTMLResponse
 
 # ==========================================
 # 1. CONFIGURACIÓN DE BASE DE DATOS Y OLLAMA
@@ -136,4 +137,150 @@ def get_all_tools(db: Session = Depends(get_db)):
         "total": len(tools), 
         "data": tools
     }
+
+
+
+
+# ... [Aquí va todo tu código actual de BD, modelos y rutas de API] ...
+
+# ==========================================
+# 4. DASHBOARD VISUAL (Frontend)
+# ==========================================
+@app.get("/api/tools")
+def get_tools(db: Session = Depends(get_db)):
+    """Devuelve todas las herramientas guardadas."""
+    tools = db.query(Tool).order_by(Tool.created_at.desc()).all()
+    return {"status": "success", "total": len(tools), "data": tools}
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def serve_dashboard():
+    """Sirve la interfaz visual del SOC."""
+    html_content = """
+    <!DOCTYPE html>
+    <html lang="es" class="dark">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>TECCO SOC - Dashboard</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <script>
+            tailwind.config = {
+                darkMode: 'class',
+                theme: { extend: { colors: { gray: { 900: '#111827', 800: '#1f2937' }, green: { 400: '#4ade80' } } } }
+            }
+        </script>
+    </head>
+    <body class="bg-gray-900 text-white font-sans antialiased p-6">
+        
+        <script>
+            if (sessionStorage.getItem('auth') !== 'true') {
+                const pwd = prompt("🔐 Acceso Restringido TECCO SOC. Ingrese contraseña:");
+                if (pwd === "admin123") { // Puedes cambiar esta contraseña
+                    sessionStorage.setItem('auth', 'true');
+                } else {
+                    document.body.innerHTML = "<h1 class='text-center text-red-500 text-3xl mt-20'>Acceso Denegado</h1>";
+                    throw new Error("Acceso denegado");
+                }
+            }
+        </script>
+
+        <div class="max-w-6xl mx-auto">
+            <header class="flex justify-between items-center mb-10 border-b border-gray-700 pb-4">
+                <h1 class="text-3xl font-bold text-green-400">🛡️ TECCO SOC <span class="text-gray-400 text-lg font-normal">v1.0</span></h1>
+                <div class="text-sm text-gray-400">Operaciones Tácticas e IA</div>
+            </header>
+
+            <div class="bg-gray-800 p-6 rounded-lg shadow-lg mb-8 border border-gray-700">
+                <h2 class="text-xl font-semibold mb-4">Añadir nueva herramienta desde GitHub</h2>
+                <div class="flex gap-4">
+                    <input type="text" id="repoUrl" placeholder="https://github.com/usuario/repo" class="w-full bg-gray-900 border border-gray-600 rounded px-4 py-2 text-white focus:outline-none focus:border-green-400">
+                    <button onclick="addTool()" id="addBtn" class="bg-green-600 hover:bg-green-500 text-white font-bold py-2 px-6 rounded transition flex-shrink-0">
+                        Analizar con IA
+                    </button>
+                </div>
+                <p id="statusMsg" class="mt-3 text-sm text-gray-400 hidden"></p>
+            </div>
+
+            <h2 class="text-2xl font-semibold mb-6">Arsenal Disponible</h2>
+            <div id="toolsGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                </div>
+        </div>
+
+        <script>
+            // Función para cargar las herramientas al entrar
+            async function loadTools() {
+                try {
+                    const response = await fetch('/api/tools');
+                    const result = await response.json();
+                    const grid = document.getElementById('toolsGrid');
+                    grid.innerHTML = '';
+
+                    result.data.forEach(tool => {
+                        const card = `
+                            <div class="bg-gray-800 border border-gray-700 rounded-lg p-5 hover:border-green-400 transition flex flex-col h-full">
+                                <div class="flex justify-between items-start mb-3">
+                                    <h3 class="text-lg font-bold text-white">${tool.name}</h3>
+                                    <span class="bg-gray-700 text-green-400 text-xs px-2 py-1 rounded border border-green-900">${tool.category}</span>
+                                </div>
+                                <p class="text-gray-400 text-sm mb-4 flex-grow">${tool.description}</p>
+                                <div class="text-xs text-gray-500 mt-auto">
+                                    <p>⚙️ Script: <span class="text-gray-300">${tool.main_script}</span></p>
+                                    <a href="${tool.repo_url}" target="_blank" class="text-blue-400 hover:underline mt-2 inline-block">Ver en GitHub ↗</a>
+                                </div>
+                            </div>
+                        `;
+                        grid.innerHTML += card;
+                    });
+                } catch (error) {
+                    console.error("Error cargando herramientas:", error);
+                }
+            }
+
+            // Función para enviar URL a la API y que Qwen la analice
+            async function addTool() {
+                const urlInput = document.getElementById('repoUrl');
+                const btn = document.getElementById('addBtn');
+                const msg = document.getElementById('statusMsg');
+                
+                if (!urlInput.value) return;
+
+                btn.disabled = true;
+                btn.innerHTML = 'Procesando con IA... ⏳';
+                msg.classList.remove('hidden', 'text-red-400', 'text-green-400');
+                msg.classList.add('text-gray-400');
+                msg.innerText = 'Descargando repositorio y analizando manual...';
+
+                try {
+                    const res = await fetch('/api/tools/add', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ repo_url: urlInput.value })
+                    });
+                    const data = await res.json();
+
+                    if (res.ok) {
+                        msg.classList.replace('text-gray-400', 'text-green-400');
+                        msg.innerText = '¡Herramienta añadida y clasificada con éxito!';
+                        urlInput.value = '';
+                        loadTools(); // Recargamos el grid
+                    } else {
+                        throw new Error(data.detail || "Error desconocido");
+                    }
+                } catch (error) {
+                    msg.classList.replace('text-gray-400', 'text-red-400');
+                    msg.innerText = '❌ Error: ' + error.message;
+                } finally {
+                    btn.disabled = false;
+                    btn.innerHTML = 'Analizar con IA';
+                }
+            }
+
+            // Cargar datos al iniciar
+            loadTools();
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
 
