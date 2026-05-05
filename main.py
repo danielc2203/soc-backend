@@ -2,6 +2,7 @@ import os
 import json
 import urllib.request
 import re
+import subprocess
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -9,6 +10,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from models import Base, Tool
 from fastapi.responses import HTMLResponse
+
 
 # ==========================================
 # 1. CONFIGURACIÓN DE BASE DE DATOS Y OLLAMA
@@ -282,5 +284,87 @@ def serve_dashboard():
     </html>
     """
     return HTMLResponse(content=html_content)
+
+
+
+# ... (tus clases BaseModel actuales)
+
+class ScanRequest(BaseModel):
+    tool_id: int
+    target: str
+    args: str = "" # Argumentos adicionales si se necesitan
+
+@app.post("/api/scans/run")
+def run_tool_scan(request: ScanRequest, db: Session = Depends(get_db)):
+    # 1. Buscamos la herramienta en la BD
+    tool = db.query(Tool).filter(Tool.id == request.tool_id).first()
+    if not tool:
+        raise HTTPException(status_code=404, detail="Herramienta no encontrada en el Arsenal.")
+
+    # 2. Registramos el objetivo en la BD (o lo obtenemos si ya existe)
+    from models import Target, Scan # Asegurar importación
+    target_record = db.query(Target).filter(Target.identity == request.target).first()
+    if not target_record:
+        target_record = Target(identity=request.target, type="Automático", tags="Dashboard")
+        db.add(target_record)
+        db.commit()
+        db.refresh(target_record)
+
+    # 3. Construimos el script de ejecución aislado en Docker
+    script_ejecucion = tool.main_script if tool.main_script != "desconocido" else "main.py"
+    bash_script = (
+        f"apk add --no-cache git > /dev/null && "
+        f"git clone {tool.repo_url} /app > /dev/null 2>&1 && "
+        f"cd /app && "
+        f"if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt > /dev/null 2>&1; fi && "
+        f"python {script_ejecucion} {request.target} {request.args}"
+    )
+    
+    comando = ["docker", "run", "--rm", "python:3.10-alpine", "sh", "-c", bash_script]
+    
+    try:
+        # 4. Ejecutamos la herramienta (Timeout de 3 minutos)
+        proceso = subprocess.run(comando, capture_output=True, text=True, timeout=180)
+        resultado_crudo = proceso.stdout if proceso.stdout else proceso.stderr
+        
+        # 5. Pasamos el resultado a Qwen para análisis (Evaluación de Riesgo)
+        prompt_ia = f"""Analiza este resultado de una herramienta de seguridad ({tool.name}) contra el objetivo {request.target}.
+        Dime brevemente: 1. Qué encontró. 2. Nivel de criticidad (Seguro, Advertencia, Critico).
+        Resultado: {resultado_crudo[:2000]}"""
+        
+        clean_ollama_url = OLLAMA_URL.replace("[", "").replace("]", "").replace("'", "").replace('"', "")
+        data_ia = {"model": "qwen2.5-coder:7b", "prompt": prompt_ia, "stream": False}
+        
+        analisis_ia = "Análisis no disponible."
+        status_ia = "Desconocido"
+        try:
+            req_ia = urllib.request.Request(clean_ollama_url, data=json.dumps(data_ia).encode('utf-8'), headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req_ia) as response_ia:
+                result_ia = json.loads(response_ia.read().decode('utf-8'))
+                analisis_ia = result_ia.get("response", "")
+                # Asignamos color para el Dashboard según lo que diga la IA
+                if "Critico" in analisis_ia or "Crítico" in analisis_ia: status_ia = "Crítico"
+                elif "Advertencia" in analisis_ia: status_ia = "Advertencia"
+                else: status_ia = "Seguro"
+        except:
+            pass
+
+        # 6. Guardamos el historial en la Base de Datos
+        nuevo_scan = Scan(
+            tool_id=tool.id,
+            target_id=target_record.id,
+            raw_output=resultado_crudo[:5000], # Limitamos tamaño
+            ai_analysis=analisis_ia,
+            status=status_ia
+        )
+        db.add(nuevo_scan)
+        db.commit()
+
+        return {"status": "success", "message": "Escaneo completado y analizado", "data": {"raw": resultado_crudo, "analysis": analisis_ia, "severity": status_ia}}
+
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=408, detail="La herramienta tardó demasiado y fue detenida.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al ejecutar: {str(e)}")
 
 
