@@ -19,17 +19,20 @@ from fastapi.responses import HTMLResponse
 # ==========================================
 # 0. AUTO-INSTALADOR DEL CLIENTE DOCKER
 # ==========================================
+DOCKER_CMD = "docker"
 try:
-    subprocess.run(["docker", "--version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run([DOCKER_CMD, "--version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     print("✅ Docker CLI ya está instalado.")
 except FileNotFoundError:
-    print("⚙️ Docker CLI no encontrado. Instalando binario estático...")
+    print("⚙️ Docker CLI no encontrado. Instalando en /tmp (sin root)...")
     os.system("curl -fsSLO https://download.docker.com/linux/static/stable/x86_64/docker-24.0.9.tgz")
     os.system("tar xzvf docker-24.0.9.tgz")
-    os.system("mv docker/docker /usr/local/bin/")
-    os.system("chmod +x /usr/local/bin/docker")
+    os.system("mv docker/docker /tmp/docker")
+    os.system("chmod +x /tmp/docker")
     os.system("rm -rf docker docker-24.0.9.tgz")
-    print("✅ Docker CLI instalado con éxito.")
+    DOCKER_CMD = "/tmp/docker" # Actualizamos la ruta a la carpeta temporal
+    print("✅ Docker CLI instalado en /tmp/docker.")
+# ==========================================
 
 # ==========================================
 # 1. CONFIGURACIÓN DE BASE DE DATOS Y OLLAMA
@@ -179,7 +182,7 @@ def run_tool_scan(request: ScanRequest, db: Session = Depends(get_db)):
         f"python {script_ejecucion} {request.target} {request.args}"
     )
     
-    comando = ["docker", "run", "--rm", "python:3.10-alpine", "sh", "-c", bash_script]
+    comando = [DOCKER_CMD, "run", "--rm", "python:3.10-alpine", "sh", "-c", bash_script]
     
     try:
         proceso = subprocess.run(comando, capture_output=True, text=True, timeout=180)
