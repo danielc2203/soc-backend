@@ -286,6 +286,119 @@ def serve_dashboard():
 
             // Cargar datos al iniciar
             loadTools();
+
+            // Variable global para saber qué herramienta vamos a ejecutar
+let currentToolId = null;
+
+// Reemplaza esto con la URL completa de tu API en Coolify
+const API_BASE_URL = "http://ekr8q5muf7m7xnr139m0qset.187.77.206.103.sslip.io"; 
+
+function openModal(toolId, toolName) {
+    currentToolId = toolId;
+    document.getElementById('modalTitle').innerText = 'Operación: ' + toolName;
+    document.getElementById('targetInput').value = '';
+    document.getElementById('resultArea').style.display = 'none';
+    document.getElementById('loadingIndicator').style.display = 'none';
+    document.getElementById('runBtn').style.display = 'block';
+    
+    // Mostramos el modal
+    document.getElementById('scanModal').style.display = 'flex';
+}
+
+function closeModal() {
+    document.getElementById('scanModal').style.display = 'none';
+}
+
+async function ejecutarEscaneo() {
+    const target = document.getElementById('targetInput').value.trim();
+    if (!target) {
+        alert("⚠️ Por favor, ingresa un objetivo válido.");
+        return;
+    }
+
+    // Cambiamos la interfaz a "Modo Carga"
+    document.getElementById('runBtn').style.display = 'none';
+    document.getElementById('loadingIndicator').style.display = 'block';
+    document.getElementById('resultArea').style.display = 'none';
+
+    try {
+        const response = await fetch(`${API_BASE_URL}/api/scans/run`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                tool_id: currentToolId,
+                target: target
+            })
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            mostrarResultado(data.data);
+        } else {
+            // Maneja errores controlados por FastAPI (ej. no existe la herramienta)
+            mostrarError(data.detail || "Error desconocido en el servidor");
+        }
+    } catch (error) {
+        // Maneja errores graves (red caída, timeout de 3 min)
+        mostrarError("La operación falló o excedió el tiempo límite (Timeout). Detalles: " + error.message);
+    }
+}
+
+function mostrarResultado(data) {
+    // Ocultamos la carga y mostramos el cuadro de resultados
+    document.getElementById('loadingIndicator').style.display = 'none';
+    const resultArea = document.getElementById('resultArea');
+    resultArea.style.display = 'block';
+    
+    // Sistema de Alertas Visuales (Semáforo)
+    let colorCode = "#10b981"; // Verde (Seguro) por defecto
+    let icon = "✅";
+    
+    if (data.severity === "Crítico") {
+        colorCode = "#ef4444"; // Rojo
+        icon = "🚨";
+    } else if (data.severity === "Advertencia") {
+        colorCode = "#f59e0b"; // Naranja/Amarillo
+        icon = "⚠️";
+    }
+
+    // Construimos la vista de respuesta usando HTML dinámico
+    resultArea.innerHTML = `
+        <h4 style="color:${colorCode}; margin-top:0; font-size:1.2rem; border-bottom:1px solid #334155; padding-bottom:8px;">
+            ${icon} Criticidad: ${data.severity}
+        </h4>
+        
+        <p style="color:#e2e8f0; font-size:0.95rem; line-height:1.5;">
+            <strong style="color:#38bdf8;">Reporte IA (Qwen):</strong><br>
+            ${data.analysis.replace(/\n/g, '<br>')}
+        </p>
+        
+        <details style="margin-top:15px; border-top:1px solid #334155; padding-top:10px;">
+            <summary style="cursor:pointer; color:#94a3b8; font-size:0.85rem; user-select:none;">
+                [+] Ver salida en crudo de la terminal Docker
+            </summary>
+            <pre style="background:#000; color:#00ff00; padding:12px; border-radius:6px; overflow-x:auto; font-size:0.75rem; margin-top:10px; border:1px solid #1f2937;">${data.raw}</pre>
+        </details>
+    `;
+}
+
+function mostrarError(mensaje) {
+    document.getElementById('loadingIndicator').style.display = 'none';
+    document.getElementById('runBtn').style.display = 'block';
+    
+    const resultArea = document.getElementById('resultArea');
+    resultArea.style.display = 'block';
+    resultArea.innerHTML = `
+        <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid #ef4444; padding: 12px; border-radius: 6px;">
+            <p style="color:#ef4444; margin:0; font-weight:500;">❌ Falla Crítica Operacional</p>
+            <p style="color:#f8fafc; margin:5px 0 0 0; font-size:0.85rem;">${mensaje}</p>
+        </div>
+    `;
+}
+
         </script>
         <!-- Modal de Ejecución (Oculto por defecto) -->
 <div id="scanModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15, 23, 42, 0.85); z-index:1000; justify-content:center; align-items:center; backdrop-filter: blur(4px);">
