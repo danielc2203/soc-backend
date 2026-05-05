@@ -8,9 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
-from models import Base, Tool
+from models import Base, Tool, Target, Scan
 from fastapi.responses import HTMLResponse
-
 
 # ==========================================
 # 1. CONFIGURACIÓN DE BASE DE DATOS Y OLLAMA
@@ -26,10 +25,10 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 app = FastAPI(title="SOC Backend API", description="Centro de Operaciones de Seguridad Potenciado por IA")
 
-# --- NUEVO: HABILITAR CORS PARA EVITAR EL "FAILED TO FETCH" ---
+# --- HABILITAR CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Permite que nuestro futuro Dashboard visual se conecte sin problemas
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -53,17 +52,21 @@ def on_startup():
 class RepoRequest(BaseModel):
     repo_url: str
 
+class ScanRequest(BaseModel):
+    tool_id: int
+    target: str
+    args: str = ""
+
 # ==========================================
-# 3. RUTAS DE LA API
+# 3. RUTAS DE LA API (Backend)
 # ==========================================
 @app.get("/")
 def read_root():
-    return {"status": "online", "message": "SOC Backend funcionando. Ve a /docs para el panel interactivo."}
+    return {"status": "online", "message": "SOC Backend funcionando. Ve a /dashboard para el panel visual."}
 
 @app.post("/api/tools/add")
 def add_tool_from_github(request: RepoRequest, db: Session = Depends(get_db)):
     repo_url = request.repo_url.rstrip("/")
-    
     existing_tool = db.query(Tool).filter(Tool.repo_url == repo_url).first()
     if existing_tool:
         raise HTTPException(status_code=400, detail="Esta herramienta ya existe en el SOC.")
@@ -127,36 +130,83 @@ README:
     db.add(nueva_herramienta)
     db.commit()
     db.refresh(nueva_herramienta)
-
     return {"status": "success", "message": "Herramienta analizada y guardada.", "data": ia_data}
 
 @app.get("/api/tools")
-def get_all_tools(db: Session = Depends(get_db)):
-    """Devuelve el catálogo completo de herramientas guardadas en el SOC."""
-    tools = db.query(Tool).all()
-    return {
-        "status": "success", 
-        "total": len(tools), 
-        "data": tools
-    }
+def get_tools(db: Session = Depends(get_db)):
+    tools = db.query(Tool).order_by(Tool.created_at.desc()).all()
+    return {"status": "success", "total": len(tools), "data": tools}
 
+@app.post("/api/scans/run")
+def run_tool_scan(request: ScanRequest, db: Session = Depends(get_db)):
+    tool = db.query(Tool).filter(Tool.id == request.tool_id).first()
+    if not tool:
+        raise HTTPException(status_code=404, detail="Herramienta no encontrada en el Arsenal.")
 
+    target_record = db.query(Target).filter(Target.identity == request.target).first()
+    if not target_record:
+        target_record = Target(identity=request.target, type="Automático", tags="Dashboard")
+        db.add(target_record)
+        db.commit()
+        db.refresh(target_record)
 
+    script_ejecucion = tool.main_script if tool.main_script != "desconocido" else "main.py"
+    bash_script = (
+        f"apk add --no-cache git > /dev/null && "
+        f"git clone {tool.repo_url} /app > /dev/null 2>&1 && "
+        f"cd /app && "
+        f"if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt > /dev/null 2>&1; fi && "
+        f"python {script_ejecucion} {request.target} {request.args}"
+    )
+    
+    comando = ["docker", "run", "--rm", "python:3.10-alpine", "sh", "-c", bash_script]
+    
+    try:
+        proceso = subprocess.run(comando, capture_output=True, text=True, timeout=180)
+        resultado_crudo = proceso.stdout if proceso.stdout else proceso.stderr
+        
+        prompt_ia = f"""Analiza este resultado de una herramienta de seguridad ({tool.name}) contra el objetivo {request.target}.
+        Dime brevemente: 1. Qué encontró. 2. Nivel de criticidad (Seguro, Advertencia, Critico).
+        Resultado: {resultado_crudo[:2000]}"""
+        
+        clean_ollama_url = OLLAMA_URL.replace("[", "").replace("]", "").replace("'", "").replace('"', "")
+        data_ia = {"model": "qwen2.5-coder:7b", "prompt": prompt_ia, "stream": False}
+        
+        analisis_ia = "Análisis no disponible."
+        status_ia = "Desconocido"
+        try:
+            req_ia = urllib.request.Request(clean_ollama_url, data=json.dumps(data_ia).encode('utf-8'), headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req_ia) as response_ia:
+                result_ia = json.loads(response_ia.read().decode('utf-8'))
+                analisis_ia = result_ia.get("response", "")
+                if "Critico" in analisis_ia or "Crítico" in analisis_ia: status_ia = "Crítico"
+                elif "Advertencia" in analisis_ia: status_ia = "Advertencia"
+                else: status_ia = "Seguro"
+        except:
+            pass
 
-# ... [Aquí va todo tu código actual de BD, modelos y rutas de API] ...
+        nuevo_scan = Scan(
+            tool_id=tool.id,
+            target_id=target_record.id,
+            raw_output=resultado_crudo[:5000],
+            ai_analysis=analisis_ia,
+            status=status_ia
+        )
+        db.add(nuevo_scan)
+        db.commit()
+
+        return {"status": "success", "message": "Escaneo completado y analizado", "data": {"raw": resultado_crudo, "analysis": analisis_ia, "severity": status_ia}}
+
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=408, detail="La herramienta tardó demasiado y fue detenida.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al ejecutar: {str(e)}")
 
 # ==========================================
 # 4. DASHBOARD VISUAL (Frontend)
 # ==========================================
-@app.get("/api/tools")
-def get_tools(db: Session = Depends(get_db)):
-    """Devuelve todas las herramientas guardadas."""
-    tools = db.query(Tool).order_by(Tool.created_at.desc()).all()
-    return {"status": "success", "total": len(tools), "data": tools}
-
 @app.get("/dashboard", response_class=HTMLResponse)
 def serve_dashboard():
-    """Sirve la interfaz visual del SOC."""
     html_content = """
     <!DOCTYPE html>
     <html lang="es" class="dark">
@@ -177,7 +227,7 @@ def serve_dashboard():
         <script>
             if (sessionStorage.getItem('auth') !== 'true') {
                 const pwd = prompt("🔐 Acceso Restringido TECCO SOC. Ingrese contraseña:");
-                if (pwd === "admin123") { // Puedes cambiar esta contraseña
+                if (pwd === "admin123") {
                     sessionStorage.setItem('auth', 'true');
                 } else {
                     document.body.innerHTML = "<h1 class='text-center text-red-500 text-3xl mt-20'>Acceso Denegado</h1>";
@@ -204,12 +254,32 @@ def serve_dashboard():
             </div>
 
             <h2 class="text-2xl font-semibold mb-6">Arsenal Disponible</h2>
-            <div id="toolsGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            <div id="toolsGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
+        </div>
+
+        <!-- Modal de Ejecución -->
+        <div id="scanModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15, 23, 42, 0.85); z-index:1000; justify-content:center; align-items:center; backdrop-filter: blur(4px);">
+            <div style="background:#1e293b; padding:25px; border-radius:12px; width:90%; max-width:550px; color:white; border: 1px solid #334155; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);">
+                <h3 id="modalTitle" style="margin-top:0; color:#e2e8f0; font-size: 1.5rem;">Lanzar Ataque</h3>
+                <p style="color:#94a3b8; font-size: 0.9rem;">Ingrese el objetivo a evaluar (URL o IP):</p>
+                <input type="text" id="targetInput" placeholder="Ej: tecco.com.co" style="width:100%; padding:12px; margin-bottom:20px; border-radius:6px; border:1px solid #475569; background:#0f172a; color:#f8fafc; font-size:1rem; outline:none;">
+                
+                <div id="loadingIndicator" style="display:none; color:#10b981; margin-bottom:20px; text-align:center;">
+                    <p style="animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;">⚙️ Desplegando contenedor y analizando con IA...<br><span style="font-size:0.8rem; color:#64748b;">Esto puede tomar hasta 3 minutos.</span></p>
                 </div>
+
+                <div id="resultArea" style="display:none; margin-bottom:20px; padding:15px; border-radius:8px; background:#0f172a; border: 1px solid #334155; max-height: 400px; overflow-y: auto;"></div>
+
+                <div style="display:flex; justify-content:flex-end; gap:12px;">
+                    <button onclick="closeModal()" style="padding:10px 18px; background:#475569; color:white; border:none; border-radius:6px; cursor:pointer; font-weight:500; transition: background 0.3s;">Cancelar</button>
+                    <button id="runBtn" onclick="ejecutarEscaneo()" style="padding:10px 18px; background:#ef4444; color:white; border:none; border-radius:6px; cursor:pointer; font-weight:bold; box-shadow: 0 4px 6px -1px rgba(239, 68, 68, 0.3); transition: background 0.3s;">🚀 Ejecutar</button>
+                </div>
+            </div>
         </div>
 
         <script>
-            // Función para cargar las herramientas al entrar
+            let currentToolId = null;
+
             async function loadTools() {
                 try {
                     const response = await fetch('/api/tools');
@@ -229,10 +299,8 @@ def serve_dashboard():
                                     <p>⚙️ Script: <span class="text-gray-300">${tool.main_script}</span></p>
                                     <a href="${tool.repo_url}" target="_blank" class="text-blue-400 hover:underline mt-2 inline-block">Ver en GitHub ↗</a>
                                 </div>
-                                <!-- Ejemplo dentro de tu tarjeta de cPanelSniper -->
-                                <div class="card-footer">
-                                    <!-- Asumiendo que el ID en la base de datos de cPanelSniper es 1 -->
-                                    <button onclick="openModal(1, 'cPanelSniper')" style="margin-top:15px; padding:8px 15px; background:#3b82f6; color:white; border:none; border-radius:6px; cursor:pointer; font-weight: 500;">
+                                <div class="mt-5 pt-4 border-t border-gray-700">
+                                    <button onclick="openModal(${tool.id}, '${tool.name}')" class="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-2 px-4 rounded transition-colors shadow-lg shadow-red-500/30">
                                         🎯 Lanzar contra objetivo
                                     </button>
                                 </div>
@@ -245,7 +313,6 @@ def serve_dashboard():
                 }
             }
 
-            // Función para enviar URL a la API y que Qwen la analice
             async function addTool() {
                 const urlInput = document.getElementById('repoUrl');
                 const btn = document.getElementById('addBtn');
@@ -257,7 +324,7 @@ def serve_dashboard():
                 btn.innerHTML = 'Procesando con IA... ⏳';
                 msg.classList.remove('hidden', 'text-red-400', 'text-green-400');
                 msg.classList.add('text-gray-400');
-                msg.innerText = 'Descargando repositorio y analizando manual...';
+                msg.innerText = 'Descargando repositorio y analizando...';
 
                 try {
                     const res = await fetch('/api/tools/add', {
@@ -269,9 +336,9 @@ def serve_dashboard():
 
                     if (res.ok) {
                         msg.classList.replace('text-gray-400', 'text-green-400');
-                        msg.innerText = '¡Herramienta añadida y clasificada con éxito!';
+                        msg.innerText = '¡Herramienta añadida con éxito!';
                         urlInput.value = '';
-                        loadTools(); // Recargamos el grid
+                        loadTools();
                     } else {
                         throw new Error(data.detail || "Error desconocido");
                     }
@@ -284,233 +351,101 @@ def serve_dashboard():
                 }
             }
 
-            // Cargar datos al iniciar
+            function openModal(toolId, toolName) {
+                currentToolId = toolId;
+                document.getElementById('modalTitle').innerText = 'Operación: ' + toolName;
+                document.getElementById('targetInput').value = '';
+                document.getElementById('resultArea').style.display = 'none';
+                document.getElementById('loadingIndicator').style.display = 'none';
+                document.getElementById('runBtn').style.display = 'block';
+                document.getElementById('scanModal').style.display = 'flex';
+            }
+
+            function closeModal() {
+                document.getElementById('scanModal').style.display = 'none';
+            }
+
+            async function ejecutarEscaneo() {
+                const target = document.getElementById('targetInput').value.trim();
+                if (!target) {
+                    alert("⚠️ Por favor, ingresa un objetivo válido.");
+                    return;
+                }
+
+                document.getElementById('runBtn').style.display = 'none';
+                document.getElementById('loadingIndicator').style.display = 'block';
+                document.getElementById('resultArea').style.display = 'none';
+
+                try {
+                    // Como el frontend y el backend están en el mismo servidor, podemos usar rutas relativas (/api/scans/run)
+                    const response = await fetch('/api/scans/run', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ tool_id: currentToolId, target: target })
+                    });
+
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        mostrarResultado(data.data);
+                    } else {
+                        mostrarError(data.detail || "Error desconocido en el servidor");
+                    }
+                } catch (error) {
+                    mostrarError("La operación falló o excedió el tiempo límite (Timeout). Detalles: " + error.message);
+                }
+            }
+
+            function mostrarResultado(data) {
+                document.getElementById('loadingIndicator').style.display = 'none';
+                const resultArea = document.getElementById('resultArea');
+                resultArea.style.display = 'block';
+                
+                let colorCode = "#10b981"; 
+                let icon = "✅";
+                
+                if (data.severity === "Crítico") {
+                    colorCode = "#ef4444"; 
+                    icon = "🚨";
+                } else if (data.severity === "Advertencia") {
+                    colorCode = "#f59e0b"; 
+                    icon = "⚠️";
+                }
+
+                resultArea.innerHTML = `
+                    <h4 style="color:${colorCode}; margin-top:0; font-size:1.2rem; border-bottom:1px solid #334155; padding-bottom:8px;">
+                        ${icon} Criticidad: ${data.severity}
+                    </h4>
+                    <p style="color:#e2e8f0; font-size:0.95rem; line-height:1.5; margin-top: 10px;">
+                        <strong style="color:#38bdf8;">Reporte IA (Qwen):</strong><br>
+                        ${data.analysis.replace(/\\n/g, '<br>')}
+                    </p>
+                    <details style="margin-top:15px; border-top:1px solid #334155; padding-top:10px;">
+                        <summary style="cursor:pointer; color:#94a3b8; font-size:0.85rem; user-select:none;">
+                            [+] Ver salida en crudo
+                        </summary>
+                        <pre style="background:#000; color:#00ff00; padding:12px; border-radius:6px; overflow-x:auto; font-size:0.75rem; margin-top:10px; border:1px solid #1f2937;">${data.raw}</pre>
+                    </details>
+                `;
+            }
+
+            function mostrarError(mensaje) {
+                document.getElementById('loadingIndicator').style.display = 'none';
+                document.getElementById('runBtn').style.display = 'block';
+                
+                const resultArea = document.getElementById('resultArea');
+                resultArea.style.display = 'block';
+                resultArea.innerHTML = `
+                    <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid #ef4444; padding: 12px; border-radius: 6px;">
+                        <p style="color:#ef4444; margin:0; font-weight:500;">❌ Falla Crítica</p>
+                        <p style="color:#f8fafc; margin:5px 0 0 0; font-size:0.85rem;">${mensaje}</p>
+                    </div>
+                `;
+            }
+
             loadTools();
-
-            // Variable global para saber qué herramienta vamos a ejecutar
-let currentToolId = null;
-
-// Reemplaza esto con la URL completa de tu API en Coolify
-const API_BASE_URL = "http://ekr8q5muf7m7xnr139m0qset.187.77.206.103.sslip.io"; 
-
-function openModal(toolId, toolName) {
-    currentToolId = toolId;
-    document.getElementById('modalTitle').innerText = 'Operación: ' + toolName;
-    document.getElementById('targetInput').value = '';
-    document.getElementById('resultArea').style.display = 'none';
-    document.getElementById('loadingIndicator').style.display = 'none';
-    document.getElementById('runBtn').style.display = 'block';
-    
-    // Mostramos el modal
-    document.getElementById('scanModal').style.display = 'flex';
-}
-
-function closeModal() {
-    document.getElementById('scanModal').style.display = 'none';
-}
-
-async function ejecutarEscaneo() {
-    const target = document.getElementById('targetInput').value.trim();
-    if (!target) {
-        alert("⚠️ Por favor, ingresa un objetivo válido.");
-        return;
-    }
-
-    // Cambiamos la interfaz a "Modo Carga"
-    document.getElementById('runBtn').style.display = 'none';
-    document.getElementById('loadingIndicator').style.display = 'block';
-    document.getElementById('resultArea').style.display = 'none';
-
-    try {
-        const response = await fetch(`${API_BASE_URL}/api/scans/run`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                tool_id: currentToolId,
-                target: target
-            })
-        });
-
-        const data = await response.json();
-
-        if (response.ok) {
-            mostrarResultado(data.data);
-        } else {
-            // Maneja errores controlados por FastAPI (ej. no existe la herramienta)
-            mostrarError(data.detail || "Error desconocido en el servidor");
-        }
-    } catch (error) {
-        // Maneja errores graves (red caída, timeout de 3 min)
-        mostrarError("La operación falló o excedió el tiempo límite (Timeout). Detalles: " + error.message);
-    }
-}
-
-function mostrarResultado(data) {
-    // Ocultamos la carga y mostramos el cuadro de resultados
-    document.getElementById('loadingIndicator').style.display = 'none';
-    const resultArea = document.getElementById('resultArea');
-    resultArea.style.display = 'block';
-    
-    // Sistema de Alertas Visuales (Semáforo)
-    let colorCode = "#10b981"; // Verde (Seguro) por defecto
-    let icon = "✅";
-    
-    if (data.severity === "Crítico") {
-        colorCode = "#ef4444"; // Rojo
-        icon = "🚨";
-    } else if (data.severity === "Advertencia") {
-        colorCode = "#f59e0b"; // Naranja/Amarillo
-        icon = "⚠️";
-    }
-
-    // Construimos la vista de respuesta usando HTML dinámico
-    resultArea.innerHTML = `
-        <h4 style="color:${colorCode}; margin-top:0; font-size:1.2rem; border-bottom:1px solid #334155; padding-bottom:8px;">
-            ${icon} Criticidad: ${data.severity}
-        </h4>
-        
-        <p style="color:#e2e8f0; font-size:0.95rem; line-height:1.5;">
-            <strong style="color:#38bdf8;">Reporte IA (Qwen):</strong><br>
-            ${data.analysis.replace(/\n/g, '<br>')}
-        </p>
-        
-        <details style="margin-top:15px; border-top:1px solid #334155; padding-top:10px;">
-            <summary style="cursor:pointer; color:#94a3b8; font-size:0.85rem; user-select:none;">
-                [+] Ver salida en crudo de la terminal Docker
-            </summary>
-            <pre style="background:#000; color:#00ff00; padding:12px; border-radius:6px; overflow-x:auto; font-size:0.75rem; margin-top:10px; border:1px solid #1f2937;">${data.raw}</pre>
-        </details>
-    `;
-}
-
-function mostrarError(mensaje) {
-    document.getElementById('loadingIndicator').style.display = 'none';
-    document.getElementById('runBtn').style.display = 'block';
-    
-    const resultArea = document.getElementById('resultArea');
-    resultArea.style.display = 'block';
-    resultArea.innerHTML = `
-        <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid #ef4444; padding: 12px; border-radius: 6px;">
-            <p style="color:#ef4444; margin:0; font-weight:500;">❌ Falla Crítica Operacional</p>
-            <p style="color:#f8fafc; margin:5px 0 0 0; font-size:0.85rem;">${mensaje}</p>
-        </div>
-    `;
-}
-
         </script>
-        <!-- Modal de Ejecución (Oculto por defecto) -->
-<div id="scanModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15, 23, 42, 0.85); z-index:1000; justify-content:center; align-items:center; backdrop-filter: blur(4px);">
-    <div style="background:#1e293b; padding:25px; border-radius:12px; width:90%; max-width:550px; color:white; border: 1px solid #334155; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);">
-        
-        <h3 id="modalTitle" style="margin-top:0; color:#e2e8f0; font-size: 1.5rem;">Lanzar Ataque</h3>
-        <p style="color:#94a3b8; font-size: 0.9rem;">Ingrese el objetivo a evaluar (URL o IP):</p>
-        
-        <input type="text" id="targetInput" placeholder="Ej: tecco.com.co" style="width:100%; padding:12px; margin-bottom:20px; border-radius:6px; border:1px solid #475569; background:#0f172a; color:#f8fafc; font-size:1rem; outline:none;">
-        
-        <!-- Indicador de Carga -->
-        <div id="loadingIndicator" style="display:none; color:#10b981; margin-bottom:20px; text-align:center;">
-            <p style="animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;">⚙️ Desplegando contenedor y analizando con IA...<br><span style="font-size:0.8rem; color:#64748b;">Esto puede tomar hasta 3 minutos.</span></p>
-        </div>
-
-        <!-- Área de Resultados (donde Qwen escupirá el reporte) -->
-        <div id="resultArea" style="display:none; margin-bottom:20px; padding:15px; border-radius:8px; background:#0f172a; border: 1px solid #334155; max-height: 400px; overflow-y: auto;">
-            <!-- El JS inyectará el contenido aquí -->
-        </div>
-
-        <!-- Botones de Acción -->
-        <div style="display:flex; justify-content:flex-end; gap:12px;">
-            <button onclick="closeModal()" style="padding:10px 18px; background:#475569; color:white; border:none; border-radius:6px; cursor:pointer; font-weight:500; transition: background 0.3s;">Cancelar</button>
-            <button id="runBtn" onclick="ejecutarEscaneo()" style="padding:10px 18px; background:#ef4444; color:white; border:none; border-radius:6px; cursor:pointer; font-weight:bold; box-shadow: 0 4px 6px -1px rgba(239, 68, 68, 0.3); transition: background 0.3s;">🚀 Ejecutar Herramienta</button>
-        </div>
-    </div>
-</div>
     </body>
     </html>
     """
     return HTMLResponse(content=html_content)
-
-
-
-# ... (tus clases BaseModel actuales)
-
-class ScanRequest(BaseModel):
-    tool_id: int
-    target: str
-    args: str = "" # Argumentos adicionales si se necesitan
-
-@app.post("/api/scans/run")
-def run_tool_scan(request: ScanRequest, db: Session = Depends(get_db)):
-    # 1. Buscamos la herramienta en la BD
-    tool = db.query(Tool).filter(Tool.id == request.tool_id).first()
-    if not tool:
-        raise HTTPException(status_code=404, detail="Herramienta no encontrada en el Arsenal.")
-
-    # 2. Registramos el objetivo en la BD (o lo obtenemos si ya existe)
-    from models import Target, Scan # Asegurar importación
-    target_record = db.query(Target).filter(Target.identity == request.target).first()
-    if not target_record:
-        target_record = Target(identity=request.target, type="Automático", tags="Dashboard")
-        db.add(target_record)
-        db.commit()
-        db.refresh(target_record)
-
-    # 3. Construimos el script de ejecución aislado en Docker
-    script_ejecucion = tool.main_script if tool.main_script != "desconocido" else "main.py"
-    bash_script = (
-        f"apk add --no-cache git > /dev/null && "
-        f"git clone {tool.repo_url} /app > /dev/null 2>&1 && "
-        f"cd /app && "
-        f"if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt > /dev/null 2>&1; fi && "
-        f"python {script_ejecucion} {request.target} {request.args}"
-    )
-    
-    comando = ["docker", "run", "--rm", "python:3.10-alpine", "sh", "-c", bash_script]
-    
-    try:
-        # 4. Ejecutamos la herramienta (Timeout de 3 minutos)
-        proceso = subprocess.run(comando, capture_output=True, text=True, timeout=180)
-        resultado_crudo = proceso.stdout if proceso.stdout else proceso.stderr
-        
-        # 5. Pasamos el resultado a Qwen para análisis (Evaluación de Riesgo)
-        prompt_ia = f"""Analiza este resultado de una herramienta de seguridad ({tool.name}) contra el objetivo {request.target}.
-        Dime brevemente: 1. Qué encontró. 2. Nivel de criticidad (Seguro, Advertencia, Critico).
-        Resultado: {resultado_crudo[:2000]}"""
-        
-        clean_ollama_url = OLLAMA_URL.replace("[", "").replace("]", "").replace("'", "").replace('"', "")
-        data_ia = {"model": "qwen2.5-coder:7b", "prompt": prompt_ia, "stream": False}
-        
-        analisis_ia = "Análisis no disponible."
-        status_ia = "Desconocido"
-        try:
-            req_ia = urllib.request.Request(clean_ollama_url, data=json.dumps(data_ia).encode('utf-8'), headers={'Content-Type': 'application/json'})
-            with urllib.request.urlopen(req_ia) as response_ia:
-                result_ia = json.loads(response_ia.read().decode('utf-8'))
-                analisis_ia = result_ia.get("response", "")
-                # Asignamos color para el Dashboard según lo que diga la IA
-                if "Critico" in analisis_ia or "Crítico" in analisis_ia: status_ia = "Crítico"
-                elif "Advertencia" in analisis_ia: status_ia = "Advertencia"
-                else: status_ia = "Seguro"
-        except:
-            pass
-
-        # 6. Guardamos el historial en la Base de Datos
-        nuevo_scan = Scan(
-            tool_id=tool.id,
-            target_id=target_record.id,
-            raw_output=resultado_crudo[:5000], # Limitamos tamaño
-            ai_analysis=analisis_ia,
-            status=status_ia
-        )
-        db.add(nuevo_scan)
-        db.commit()
-
-        return {"status": "success", "message": "Escaneo completado y analizado", "data": {"raw": resultado_crudo, "analysis": analisis_ia, "severity": status_ia}}
-
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=408, detail="La herramienta tardó demasiado y fue detenida.")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al ejecutar: {str(e)}")
-
-
