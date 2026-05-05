@@ -3,6 +3,11 @@ import json
 import urllib.request
 import re
 import subprocess
+import os
+import json
+import urllib.request
+import re
+import subprocess
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -10,6 +15,21 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from models import Base, Tool, Target, Scan
 from fastapi.responses import HTMLResponse
+
+# ==========================================
+# 0. AUTO-INSTALADOR DEL CLIENTE DOCKER
+# ==========================================
+try:
+    subprocess.run(["docker", "--version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    print("✅ Docker CLI ya está instalado.")
+except FileNotFoundError:
+    print("⚙️ Docker CLI no encontrado. Instalando binario estático...")
+    os.system("curl -fsSLO https://download.docker.com/linux/static/stable/x86_64/docker-24.0.9.tgz")
+    os.system("tar xzvf docker-24.0.9.tgz")
+    os.system("mv docker/docker /usr/local/bin/")
+    os.system("chmod +x /usr/local/bin/docker")
+    os.system("rm -rf docker docker-24.0.9.tgz")
+    print("✅ Docker CLI instalado con éxito.")
 
 # ==========================================
 # 1. CONFIGURACIÓN DE BASE DE DATOS Y OLLAMA
