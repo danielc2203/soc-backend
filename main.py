@@ -126,3 +126,14 @@ README:
     db.refresh(nueva_herramienta)
 
     return {"status": "success", "message": "Herramienta analizada y guardada.", "data": ia_data}
+
+@app.get("/api/tools")
+def get_all_tools(db: Session = Depends(get_db)):
+    """Devuelve el catálogo completo de herramientas guardadas en el SOC."""
+    tools = db.query(Tool).all()
+    return {
+        "status": "success", 
+        "total": len(tools), 
+        "data": tools
+    }
+
