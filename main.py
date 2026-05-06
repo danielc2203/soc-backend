@@ -3,11 +3,7 @@ import json
 import urllib.request
 import re
 import subprocess
-import os
-import json
-import urllib.request
-import re
-import subprocess
+import shlex  # NUEVO: Librería de seguridad para comandos de terminal
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -17,7 +13,7 @@ from models import Base, Tool, Target, Scan
 from fastapi.responses import HTMLResponse
 
 # ==========================================
-# 0. AUTO-INSTALADOR DEL CLIENTE DOCKER
+# 0. AUTO-INSTALADOR DEL CLIENTE DOCKER (/tmp para evitar permisos root)
 # ==========================================
 DOCKER_CMD = "docker"
 try:
@@ -30,7 +26,7 @@ except FileNotFoundError:
     os.system("mv docker/docker /tmp/docker")
     os.system("chmod +x /tmp/docker")
     os.system("rm -rf docker docker-24.0.9.tgz")
-    DOCKER_CMD = "/tmp/docker" # Actualizamos la ruta a la carpeta temporal
+    DOCKER_CMD = "/tmp/docker"
     print("✅ Docker CLI instalado en /tmp/docker.")
 # ==========================================
 
@@ -46,7 +42,7 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://187.77.206.103:11434/api/generate")
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-app = FastAPI(title="SOC Backend API", description="Centro de Operaciones de Seguridad Potenciado por IA")
+app = FastAPI(title="TECCO SOC API", description="Centro de Operaciones de Seguridad Potenciado por IA")
 
 # --- HABILITAR CORS ---
 app.add_middleware(
@@ -70,7 +66,7 @@ def on_startup():
     print("✅ Base de datos lista.")
 
 # ==========================================
-# 2. MODELOS DE DATOS (Lo que recibe la API)
+# 2. MODELOS DE DATOS
 # ==========================================
 class RepoRequest(BaseModel):
     repo_url: str
@@ -160,8 +156,32 @@ def get_tools(db: Session = Depends(get_db)):
     tools = db.query(Tool).order_by(Tool.created_at.desc()).all()
     return {"status": "success", "total": len(tools), "data": tools}
 
+@app.get("/api/history")
+def get_scan_history(db: Session = Depends(get_db)):
+    scans = db.query(Scan).order_by(Scan.executed_at.desc()).all()
+    history = []
+    for scan in scans:
+        history.append({
+            "id": scan.id,
+            "date": scan.executed_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "target": scan.target.identity if scan.target else "Desconocido",
+            "tool": scan.tool.name if scan.tool else "Desconocida",
+            "status": scan.status,
+            "raw_output": scan.raw_output,
+            "ai_analysis": scan.ai_analysis
+        })
+    return {"status": "success", "data": history}
+
 @app.post("/api/scans/run")
 def run_tool_scan(request: ScanRequest, db: Session = Depends(get_db)):
+    # ---------------------------------------------------------
+    # 🛡️ CAPA DE SEGURIDAD 1: Validación estricta por Regex
+    # Solo permite letras, números, puntos, guiones, barras y dos puntos (URLs/IPs)
+    # Rechaza espacios, punto y comas, y operadores de terminal (&, |, >, <)
+    # ---------------------------------------------------------
+    if not re.match(r"^[a-zA-Z0-9.\-:/]+$", request.target):
+        raise HTTPException(status_code=400, detail="Objetivo bloqueado por seguridad. Formato inválido o caracteres peligrosos detectados.")
+
     tool = db.query(Tool).filter(Tool.id == request.tool_id).first()
     if not tool:
         raise HTTPException(status_code=404, detail="Herramienta no encontrada en el Arsenal.")
@@ -173,15 +193,23 @@ def run_tool_scan(request: ScanRequest, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(target_record)
 
-    script_ejecucion = tool.main_script if tool.main_script != "desconocido" else "main.py"
+    # ---------------------------------------------------------
+    # 🛡️ CAPA DE SEGURIDAD 2: Sanitización de terminal (shlex)
+    # Envuelve las variables para que el sistema no pueda ejecutarlas como comandos extra
+    # ---------------------------------------------------------
+    safe_target = shlex.quote(request.target)
+    safe_args = shlex.quote(request.args) if request.args else ""
+    script_ejecucion = shlex.quote(tool.main_script if tool.main_script != "desconocido" else "main.py")
+
     bash_script = (
         f"apk add --no-cache git > /dev/null && "
         f"git clone {tool.repo_url} /app > /dev/null 2>&1 && "
         f"cd /app && "
         f"if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt > /dev/null 2>&1; fi && "
-        f"python {script_ejecucion} {request.target} {request.args}"
+        f"python {script_ejecucion} {safe_target} {safe_args}"
     )
     
+    # Ejecución usando la ruta de docker segura
     comando = [DOCKER_CMD, "run", "--rm", "python:3.10-alpine", "sh", "-c", bash_script]
     
     try:
@@ -228,26 +256,6 @@ def run_tool_scan(request: ScanRequest, db: Session = Depends(get_db)):
 # ==========================================
 # 4. DASHBOARD VISUAL (Frontend)
 # ==========================================
-@app.get("/api/history")
-def get_scan_history(db: Session = Depends(get_db)):
-    """Extrae todo el historial de escaneos de la Base de Datos"""
-    scans = db.query(Scan).order_by(Scan.executed_at.desc()).all()
-    history = []
-    for scan in scans:
-        history.append({
-            "id": scan.id,
-            "date": scan.executed_at.strftime("%Y-%m-%d %H:%M:%S"),
-            "target": scan.target.identity if scan.target else "Desconocido",
-            "tool": scan.tool.name if scan.tool else "Desconocida",
-            "status": scan.status,
-            "raw_output": scan.raw_output,
-            "ai_analysis": scan.ai_analysis
-        })
-    return {"status": "success", "data": history}
-@app.get("/dashboard", response_class=HTMLResponse)
-# ==========================================
-# 4. DASHBOARD VISUAL (Frontend)
-# ==========================================
 @app.get("/dashboard", response_class=HTMLResponse)
 def serve_dashboard():
     html_content = """
@@ -265,7 +273,6 @@ def serve_dashboard():
             }
         </script>
         <style>
-            /* Custom scrollbar para los reportes largos */
             ::-webkit-scrollbar { width: 8px; height: 8px; }
             ::-webkit-scrollbar-track { background: #1f2937; }
             ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
@@ -288,17 +295,15 @@ def serve_dashboard():
 
         <div class="max-w-7xl mx-auto">
             <header class="flex justify-between items-center mb-6 border-b border-gray-700 pb-4">
-                <h1 class="text-3xl font-bold text-green-400">🛡️ TECCO SOC <span class="text-gray-400 text-lg font-normal">v2.0</span></h1>
+                <h1 class="text-3xl font-bold text-green-400">🛡️ TECCO SOC <span class="text-gray-400 text-lg font-normal">v2.1 (Secured)</span></h1>
                 <div class="text-sm text-gray-400">Centro de Mando Avanzado</div>
             </header>
 
-            <!-- SISTEMA DE PESTAÑAS -->
             <div class="flex space-x-6 mb-8 border-b border-gray-800">
                 <button id="tabBtn-arsenal" onclick="switchTab('arsenal')" class="pb-3 text-green-400 border-b-2 border-green-400 font-semibold transition-colors">🚀 Arsenal Táctico</button>
                 <button id="tabBtn-history" onclick="switchTab('history')" class="pb-3 text-gray-500 hover:text-gray-300 border-b-2 border-transparent font-semibold transition-colors">🗄️ Historial de Operaciones</button>
             </div>
 
-            <!-- VISTA 1: ARSENAL (Lo que ya tenías) -->
             <div id="view-arsenal" class="block">
                 <div class="bg-gray-800 p-6 rounded-lg shadow-lg mb-8 border border-gray-700">
                     <h2 class="text-xl font-semibold mb-4">Añadir nueva herramienta desde GitHub</h2>
@@ -315,7 +320,6 @@ def serve_dashboard():
                 <div id="toolsGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
             </div>
 
-            <!-- VISTA 2: HISTORIAL Y REPORTES -->
             <div id="view-history" class="hidden">
                 <div class="bg-gray-800 rounded-lg shadow-lg border border-gray-700 overflow-hidden">
                     <table class="w-full text-left border-collapse">
@@ -328,16 +332,13 @@ def serve_dashboard():
                                 <th class="p-4 font-semibold text-right">Acción</th>
                             </tr>
                         </thead>
-                        <tbody id="historyTableBody" class="text-sm divide-y divide-gray-700/50">
-                            <!-- JS inyectará el historial aquí -->
-                        </tbody>
+                        <tbody id="historyTableBody" class="text-sm divide-y divide-gray-700/50"></tbody>
                     </table>
                 </div>
             </div>
 
         </div>
 
-        <!-- MODAL 1: LANZAR ATAQUE -->
         <div id="scanModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15, 23, 42, 0.85); z-index:1000; justify-content:center; align-items:center; backdrop-filter: blur(4px);">
             <div style="background:#1e293b; padding:25px; border-radius:12px; width:90%; max-width:550px; color:white; border: 1px solid #334155; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);">
                 <h3 id="modalTitle" style="margin-top:0; color:#e2e8f0; font-size: 1.5rem;">Lanzar Ataque</h3>
@@ -345,7 +346,7 @@ def serve_dashboard():
                 <input type="text" id="targetInput" placeholder="Ej: tecco.com.co" style="width:100%; padding:12px; margin-bottom:20px; border-radius:6px; border:1px solid #475569; background:#0f172a; color:#f8fafc; font-size:1rem; outline:none;">
                 
                 <div id="loadingIndicator" style="display:none; color:#10b981; margin-bottom:20px; text-align:center;">
-                    <p style="animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;">⚙️ Desplegando contenedor y analizando con IA...<br><span style="font-size:0.8rem; color:#64748b;">Esto puede tomar hasta 3 minutos.</span></p>
+                    <p style="animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;">⚙️ Desplegando contenedor aislado y analizando...<br><span style="font-size:0.8rem; color:#64748b;">Esto puede tomar hasta 3 minutos.</span></p>
                 </div>
                 <div id="resultArea" style="display:none; margin-bottom:20px; padding:15px; border-radius:8px; background:#0f172a; border: 1px solid #334155; max-height: 400px; overflow-y: auto;"></div>
 
@@ -356,11 +357,8 @@ def serve_dashboard():
             </div>
         </div>
 
-        <!-- MODAL 2: VER REPORTE DE INTELIGENCIA -->
         <div id="reportModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0, 0, 0, 0.9); z-index:2000; justify-content:center; align-items:center; backdrop-filter: blur(8px);">
             <div style="background:#111827; border-radius:12px; width:95%; max-width:800px; max-height:90vh; display:flex; flex-direction:column; border: 1px solid #374151; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 1);">
-                
-                <!-- Encabezado del Modal -->
                 <div class="p-6 border-b border-gray-800 flex justify-between items-start">
                     <div>
                         <h3 class="text-2xl font-bold text-white mb-1" id="rep-title">📄 Informe Detallado de Inteligencia</h3>
@@ -368,17 +366,12 @@ def serve_dashboard():
                     </div>
                     <span id="rep-badge" class="px-3 py-1 rounded-full text-sm font-bold border">Estado</span>
                 </div>
-
-                <!-- Cuerpo Scrollable -->
                 <div class="p-6 overflow-y-auto flex-grow bg-gray-900">
                     <h4 class="text-lg font-semibold text-blue-400 mb-3 border-b border-gray-800 pb-2">🧠 Análisis Ejecutivo (Qwen IA)</h4>
-                    <div id="rep-ai" class="text-gray-300 text-sm leading-relaxed mb-8 whitespace-pre-wrap">Cargando análisis...</div>
-
+                    <div id="rep-ai" class="text-gray-300 text-sm leading-relaxed mb-8 whitespace-pre-wrap">Cargando...</div>
                     <h4 class="text-lg font-semibold text-gray-400 mb-3 border-b border-gray-800 pb-2">💻 Telemetría Cruda (Consola)</h4>
-                    <pre id="rep-raw" class="bg-black text-green-500 p-4 rounded-lg text-xs overflow-x-auto border border-gray-800 font-mono">Cargando consola...</pre>
+                    <pre id="rep-raw" class="bg-black text-green-500 p-4 rounded-lg text-xs overflow-x-auto border border-gray-800 font-mono">Cargando...</pre>
                 </div>
-
-                <!-- Pie del Modal -->
                 <div class="p-4 border-t border-gray-800 flex justify-end bg-gray-900 rounded-b-12px">
                     <button onclick="closeModal('reportModal')" class="bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 px-6 rounded transition">Cerrar Informe</button>
                 </div>
@@ -387,33 +380,24 @@ def serve_dashboard():
 
         <script>
             let currentToolId = null;
-            let historyDataRaw = []; // Guardamos los datos puros para el modal
+            let historyDataRaw = [];
 
-            // --- NAVEGACIÓN POR PESTAÑAS ---
             function switchTab(tabName) {
-                // Ocultar todo
                 document.getElementById('view-arsenal').classList.add('hidden');
                 document.getElementById('view-history').classList.add('hidden');
-                
-                // Resetear botones
                 document.getElementById('tabBtn-arsenal').className = "pb-3 text-gray-500 hover:text-gray-300 border-b-2 border-transparent font-semibold transition-colors";
                 document.getElementById('tabBtn-history').className = "pb-3 text-gray-500 hover:text-gray-300 border-b-2 border-transparent font-semibold transition-colors";
-
-                // Activar pestaña seleccionada
                 document.getElementById(`view-${tabName}`).classList.remove('hidden');
                 document.getElementById(`tabBtn-${tabName}`).className = "pb-3 text-green-400 border-b-2 border-green-400 font-semibold transition-colors";
-
                 if (tabName === 'history') loadHistory();
             }
 
-            // --- FUNCIONES DEL ARSENAL ---
             async function loadTools() {
                 try {
                     const response = await fetch('/api/tools');
                     const result = await response.json();
                     const grid = document.getElementById('toolsGrid');
                     grid.innerHTML = '';
-
                     result.data.forEach(tool => {
                         grid.innerHTML += `
                             <div class="bg-gray-800 border border-gray-700 rounded-lg p-5 hover:border-green-400 transition flex flex-col h-full">
@@ -433,11 +417,10 @@ def serve_dashboard():
                             </div>
                         `;
                     });
-                } catch (e) { console.error("Error cargando herramientas:", e); }
+                } catch (e) { console.error(e); }
             }
 
             async function addTool() {
-                /* ... (Mismo código de addTool de antes) ... */
                 const urlInput = document.getElementById('repoUrl');
                 const btn = document.getElementById('addBtn');
                 const msg = document.getElementById('statusMsg');
@@ -466,24 +449,19 @@ def serve_dashboard():
                 }
             }
 
-            // --- FUNCIONES DEL HISTORIAL ---
             async function loadHistory() {
                 try {
                     const tbody = document.getElementById('historyTableBody');
                     tbody.innerHTML = '<tr><td colspan="5" class="p-4 text-center text-gray-500">Cargando base de datos táctica...</td></tr>';
-                    
                     const response = await fetch('/api/history');
                     const result = await response.json();
-                    historyDataRaw = result.data; // Guardamos globalmente
+                    historyDataRaw = result.data;
                     tbody.innerHTML = '';
-
                     if(historyDataRaw.length === 0) {
                         tbody.innerHTML = '<tr><td colspan="5" class="p-4 text-center text-gray-500">No hay operaciones registradas.</td></tr>';
                         return;
                     }
-
                     historyDataRaw.forEach((scan, index) => {
-                        // Determinar color de la etiqueta
                         let badgeHtml = `<span class="bg-green-900/50 text-green-400 px-2 py-1 rounded text-xs border border-green-800">✅ Seguro</span>`;
                         if (scan.status === "Crítico") badgeHtml = `<span class="bg-red-900/50 text-red-400 px-2 py-1 rounded text-xs border border-red-800">🚨 Crítico</span>`;
                         if (scan.status === "Advertencia") badgeHtml = `<span class="bg-yellow-900/50 text-yellow-400 px-2 py-1 rounded text-xs border border-yellow-800">⚠️ Advertencia</span>`;
@@ -502,10 +480,9 @@ def serve_dashboard():
                             </tr>
                         `;
                     });
-                } catch (e) { console.error("Error cargando historial:", e); }
+                } catch (e) { console.error(e); }
             }
 
-            // --- CONTROL DE MODALES ---
             function openAttackModal(toolId, toolName) {
                 currentToolId = toolId;
                 document.getElementById('modalTitle').innerText = 'Operación: ' + toolName;
@@ -518,36 +495,25 @@ def serve_dashboard():
 
             function openReportModal(index) {
                 const scan = historyDataRaw[index];
-                
-                // Llenar datos de la cabecera
                 document.getElementById('rep-subtitle').innerText = `Objetivo: ${scan.target} | Herramienta: ${scan.tool} | Fecha: ${scan.date}`;
-                
-                // Colorear Etiqueta
                 const badge = document.getElementById('rep-badge');
                 if (scan.status === "Crítico") { badge.className = "px-3 py-1 rounded-full text-sm font-bold border bg-red-900/30 text-red-400 border-red-800"; badge.innerText = "🚨 Crítico"; }
                 else if (scan.status === "Advertencia") { badge.className = "px-3 py-1 rounded-full text-sm font-bold border bg-yellow-900/30 text-yellow-400 border-yellow-800"; badge.innerText = "⚠️ Advertencia"; }
                 else { badge.className = "px-3 py-1 rounded-full text-sm font-bold border bg-green-900/30 text-green-400 border-green-800"; badge.innerText = "✅ Seguro"; }
 
-                // Llenar contenido
-                document.getElementById('rep-ai').innerHTML = scan.ai_analysis.replace(/\\n/g, '<br>'); // Formatear saltos de línea
+                document.getElementById('rep-ai').innerHTML = scan.ai_analysis.replace(/\\n/g, '<br>');
                 document.getElementById('rep-raw').innerText = scan.raw_output;
-
                 document.getElementById('reportModal').style.display = 'flex';
             }
 
-            function closeModal(modalId) {
-                document.getElementById(modalId).style.display = 'none';
-            }
+            function closeModal(modalId) { document.getElementById(modalId).style.display = 'none'; }
 
-            // --- EJECUCIÓN (Llamada al Backend) ---
             async function ejecutarEscaneo() {
-                /* ... (Mismo código de ejecutarEscaneo de antes, solo que al final llamamos a loadHistory) ... */
                 const target = document.getElementById('targetInput').value.trim();
                 if (!target) { alert("⚠️ Ingresa un objetivo válido."); return; }
 
                 document.getElementById('runBtn').style.display = 'none';
                 document.getElementById('loadingIndicator').style.display = 'block';
-                document.getElementById('resultArea').style.display = 'none';
 
                 try {
                     const response = await fetch('/api/scans/run', {
@@ -557,25 +523,18 @@ def serve_dashboard():
                     const data = await response.json();
                     
                     if (response.ok) {
-                        // Ocultar carga y mostrar en el modal (Opcional, ahora todo queda en el historial)
                         document.getElementById('loadingIndicator').style.display = 'none';
                         closeModal('scanModal'); 
-                        
-                        // Si estábamos en la pestaña historial, la recargamos. Si no, cambiamos a ella.
                         switchTab('history');
-                        
-                        // Abrimos directamente el último reporte generado (que será el índice 0)
                         setTimeout(() => { openReportModal(0); }, 500); 
-
                     } else throw new Error(data.detail);
                 } catch (error) {
                     document.getElementById('loadingIndicator').style.display = 'none';
                     document.getElementById('runBtn').style.display = 'block';
-                    alert("Falla Crítica: " + error.message);
+                    alert("⚠️ Bloqueo de Seguridad o Falla: " + error.message);
                 }
             }
 
-            // Inicializar página
             loadTools();
         </script>
     </body>
